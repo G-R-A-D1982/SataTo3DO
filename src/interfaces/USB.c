@@ -140,8 +140,8 @@ fileCmd_s fileCmdRequired;
 static bool check_eject(device_s *dev) {
   //Execute right now
   LOG_SATA("Eject\n");
-  if (CDROM_ExecuteEject(dev)) dev->state = INQUIRY;
-    return true;
+  if (CDROM_ExecuteEject(dev->dev_addr)) dev->state = INQUIRY;
+  return true;
 }
 
 void USB_reset() {

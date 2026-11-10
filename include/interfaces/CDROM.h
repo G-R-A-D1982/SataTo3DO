@@ -1,11 +1,15 @@
 #ifndef __CDROM_HOST_H_INCLUDE__
 #define __CDROM_HOST_H_INCLUDE__
 
+#include <stdint.h>
+
+#include "USB.h"
+
 extern bool CDROM_Host_loop(device_s *dev);
 
 extern bool CDROM_Inquiry(uint8_t dev_addr, uint8_t lun);
 
-extern bool CDROM_ExecuteEject();
+extern bool CDROM_ExecuteEject(uint8_t dev_addr);
 
 extern void CDROM_ready(uint8_t dev_addr, bool ready);
 

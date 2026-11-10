@@ -60,6 +60,7 @@ extern void USB_reset(void);
 
 extern device_s* getDevice(uint8_t dev_addr);
 extern device_s* getDeviceIndex(uint8_t idx);
+extern int getDeviceCount(void);
 
 extern bool read_complete_cb(uint8_t dev_addr, msc_cbw_t const* cbw, msc_csw_t const* csw);
 
