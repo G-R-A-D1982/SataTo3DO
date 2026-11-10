@@ -35,8 +35,7 @@ extern void requestWriteFile(uint8_t* buf, uint16_t length);
 extern void requestReadFile(uint8_t* buf, uint16_t length);
 extern void requestCloseFile();
 
-extern void requestBootImage();
-extern void waitForLoad();
+extern void requestBootImage(uint8_t dev_addr);
 
 extern int getPlaylistEntries();
 extern void updatePlayListEntries();

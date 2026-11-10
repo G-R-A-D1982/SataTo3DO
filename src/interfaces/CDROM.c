@@ -42,6 +42,18 @@ static bool startClose = true;
 
 uint8_t readBuffer[20480];
 
+static void cd_probe_failed(uint8_t dev_addr) {
+  for (int i = 0; i < CFG_TUH_DEVICE_MAX; i++) {
+    device_s *dev = getDeviceIndex(i);
+    if (dev->dev_addr == dev_addr) {
+      dev->cdProbePending = false;
+      dev->cdMediaReady = false;
+      break;
+    }
+  }
+  mediaInterrupt();
+}
+
 
 extern volatile bool is_audio;
 extern volatile bool has_subQ;
@@ -165,24 +177,34 @@ static bool read_header_complete_cb(uint8_t dev_addr, msc_cbw_t const* cbw, msc_
   usb_cmd_on_going = false;
   LOG_SATA("read_header_complete_cb\n");
   device_s *dev = getDevice(dev_addr);
+  if (dev == NULL || csw->status != MSC_CSW_STATUS_GOOD) {
+    cd_probe_failed(dev_addr);
+    return false;
+  }
   if (readBuffer[0] == 0x2) {
     /* 00h - audio; 01h - Mode 1 (games) - Mode 2 (CD-XA photoCD) */
     //Photo CD shall have an audio track. CD-i are Mode 2 but without audio.
     dev->rawImage.format = 0x20; //Only CD-ROM, CD-DA and CD-XA are supported
   }
-  if (currentImage.dev_addr == 0xFF) {
-    memcpy(&currentImage, &dev->rawImage, sizeof(cd_s));
-    if (dev->state < MOUNTED) dev->state = MOUNTED;
-    set3doCDReady(dev_addr, true);
-    set3doDriveMounted(dev_addr, true);
-    mediaInterrupt();
-  }
+  dev->cdProbePending = false;
+  dev->cdMediaReady = true;
+  if (dev->state < MOUNTED) dev->state = MOUNTED;
+  mediaInterrupt();
   return true;
 }
 
 static bool read_toc_complete_cb(uint8_t dev_addr, msc_cbw_t const* cbw, msc_csw_t const* csw) {
   device_s *dev = getDevice(dev_addr);
-  dev->rawImage.nb_track = ((readBuffer[0]<<8)+readBuffer[1] - 2)/8;
+  if (dev == NULL || csw->status != MSC_CSW_STATUS_GOOD) {
+    cd_probe_failed(dev_addr);
+    return false;
+  }
+  uint16_t toc_length = (readBuffer[0] << 8) | readBuffer[1];
+  if (toc_length < 18 || (toc_length - 2)/8 > 100) {
+    cd_probe_failed(dev_addr);
+    return false;
+  }
+  dev->rawImage.nb_track = (toc_length - 2)/8;
 
   dev->rawImage.first_track = readBuffer[2];
   dev->rawImage.last_track = readBuffer[3];
@@ -205,6 +227,7 @@ static bool read_toc_complete_cb(uint8_t dev_addr, msc_cbw_t const* cbw, msc_csw
   if (dev->rawImage.tracks[0].CTRL_ADR & 0x4) {
     if (!tuh_msc_read_header(dev_addr, cbw->lun, readBuffer, first_track, read_header_complete_cb)) {
       LOG_SATA("Got error with header read\n");
+      cd_probe_failed(dev_addr);
       return false;
     }
   } else {
@@ -216,7 +239,16 @@ static bool read_toc_complete_cb(uint8_t dev_addr, msc_cbw_t const* cbw, msc_csw
 
 static bool read_toc_light_complete_cb(uint8_t dev_addr, msc_cbw_t const* cbw, msc_csw_t const* csw) {
   device_s *dev = getDevice(dev_addr);
-  dev->rawImage.nb_track = (((readBuffer[0]<<8)+readBuffer[1]) - 2)/8;
+  if (dev == NULL || csw->status != MSC_CSW_STATUS_GOOD) {
+    cd_probe_failed(dev_addr);
+    return false;
+  }
+  uint16_t toc_length = (readBuffer[0] << 8) | readBuffer[1];
+  if (toc_length < 18 || (toc_length - 2)/8 > 100) {
+    cd_probe_failed(dev_addr);
+    return false;
+  }
+  dev->rawImage.nb_track = (toc_length - 2)/8;
 
   dev->rawImage.first_track = readBuffer[2];
   dev->rawImage.last_track = readBuffer[3];
@@ -226,6 +258,7 @@ static bool read_toc_light_complete_cb(uint8_t dev_addr, msc_cbw_t const* cbw, m
   if (dev->rawImage.nb_track > 1) {
     if (!tuh_msc_read_toc(dev_addr, cbw->lun, readBuffer, 1, 0, dev->rawImage.nb_track-1, read_toc_complete_cb)) {
         LOG_SATA("Got error with toc read\n");
+        cd_probe_failed(dev_addr);
         return false;
     }
   } else {
@@ -272,10 +305,13 @@ void CDROM_ready(uint8_t dev_addr, bool ready) {
 bool CDROM_Inquiry(uint8_t dev_addr, uint8_t lun) {
 
   device_s *dev = getDevice(dev_addr);
+  if (dev == NULL) return false;
   if (tuh_msc_get_block_size(dev_addr, lun) == 0) {
+    cd_probe_failed(dev_addr);
     return false;
   }
-  dev->tray_open = false; //In case of slot-in consider it has started and tray is closed
+  dev->cdProbePending = true;
+  dev->cdMediaReady = false;
   dev->useable = true;
 
 
@@ -303,6 +339,7 @@ bool CDROM_Inquiry(uint8_t dev_addr, uint8_t lun) {
 
   if (!tuh_msc_read_toc(dev_addr, lun, readBuffer, 1, 0, 0, read_toc_light_complete_cb)) {
     LOG_SATA("Got error with toc read\n");
+    cd_probe_failed(dev_addr);
     return false;
   }
 

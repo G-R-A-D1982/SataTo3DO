@@ -639,52 +639,108 @@ void sendRawData(int command, uint8_t *buffer, int length) {
   if (!sendAnswerStatusMixed(buffer, length, status_buffer, 2, true, false)) return;
 }
 
-static bool hasMediaInterrupt = false;
+static volatile bool hasMediaInterrupt = false;
+static bool mediaSearchActive = false;
+static bool mediaFallbackPrepared = false;
+static int mediaSearchIndex = 0;
+static uint8_t mediaRequestedDevice = 0xFF;
+
 void mediaInterrupt(void) {
   hasMediaInterrupt = true;
   // canHandleReset = false;
   // status |= TRAY_IN;
 }
 void handleMediaInterrupt() {
-  if (!hasMediaInterrupt) return;
-  if ((status & DISC_PRESENT) && !canHandleReset) {
-    gpio_put(LED, ledState);
-    ledState = !ledState;
-    return;
+  if (!hasMediaInterrupt && !mediaSearchActive) return;
+  if (!mediaSearchActive) {
+    if ((status & DISC_PRESENT) && !canHandleReset) {
+      gpio_put(LED, ledState);
+      ledState = !ledState;
+      return;
+    }
+
+    mediaSearchActive = true;
+    mediaFallbackPrepared = false;
+    mediaSearchIndex = 0;
+    mediaRequestedDevice = 0xFF;
+    gpio_put(CDMDCHG, 0); //Under reset
+    status &= ~DISC_PRESENT & ~SPINNING;
+    status |= CHECK_ERROR;
+    errorCode = DISC_REMOVED;
+    sleep_ms(10);
+    while (!pio_sm_is_rx_fifo_empty(pio0, sm_read)) {
+      pio_sm_get(pio0, sm_read);
+    }
+    LOG_SATA("Look for BootImage\n");
+    onBootIso = false;
   }
   hasMediaInterrupt = false;
-  // gpio_set_dir(CDRST, true);
-  // gpio_put(CDRST, 0);
-  // pio_sm_set_enabled(pio0, sm_read, false);
-  // gpio_put(CDMDCHG, 1); //Under reset
-  // sleep_ms(200);
-  // gpio_put(CDRST, 1);
-  // gpio_set_dir(CDRST, false);
-  // sleep_ms(150);
-  // gpio_put(CDMDCHG, 0); //Under reset
-  // sleep_ms(10);
-  gpio_put(CDMDCHG, 0); //Under reset
-  status &= ~DISC_PRESENT & ~SPINNING;
-  status |= CHECK_ERROR;
-  errorCode = DISC_REMOVED;
-  sleep_ms(10);
-  while (!pio_sm_is_rx_fifo_empty(pio0, sm_read)) {
-    pio_sm_get(pio0, sm_read);
+
+  bool cdProbePending = false;
+  for (int i = 0; i < CFG_TUH_DEVICE_MAX; i++) {
+    device_s *dev = getDeviceIndex(i);
+    if (dev->dev_addr != 0xFF && dev->type == CD_TYPE) {
+      cdProbePending |= dev->cdProbePending || dev->cdTrayStatePending || dev->tray_open;
+    }
   }
-  LOG_SATA("Look for BootImage\n");
-  onBootIso = false;
-  if (getPlaylistEntries() == 0) {
-    currentImage.dev_addr = 0xFF;
-    currentImage.lun = 0x0;
+  if (cdProbePending) {
+    gpio_put(CDMDCHG, 1);
+    return;
   }
-  if (currentImage.dev_addr != 0xFF) {
-    device_s *current_dev = getDevice(currentImage.dev_addr);
-    if (current_dev->type == CD_TYPE) {
+
+  for (int i = 0; i < CFG_TUH_DEVICE_MAX; i++) {
+    device_s *dev = getDeviceIndex(i);
+    if (dev->dev_addr == 0xFF || dev->type != CD_TYPE || !dev->cdMediaReady) continue;
+
+    if (currentImage.curDir != NULL) free(currentImage.curDir);
+    if (currentImage.curPath != NULL) free(currentImage.curPath);
+    memcpy(&currentImage, &dev->rawImage, sizeof(cd_s));
+    currentImage.dev_addr = dev->dev_addr;
+    currentImage.lun = dev->lun;
+    dev->state = MOUNTED;
+    set3doCDReady(dev->dev_addr, true);
+    set3doDriveMounted(dev->dev_addr, true);
+    mediaSearchActive = false;
+    mediaFallbackPrepared = false;
+    gpio_put(CDMDCHG, 1);
+    return;
+  }
+
+  if (!mediaFallbackPrepared) {
+    if (getPlaylistEntries() == 0) {
+      if (currentImage.curDir != NULL) free(currentImage.curDir);
+      if (currentImage.curPath != NULL) free(currentImage.curPath);
+      currentImage.curDir = NULL;
+      currentImage.curPath = NULL;
       currentImage.dev_addr = 0xFF;
       currentImage.lun = 0x0;
     }
+    if (currentImage.dev_addr != 0xFF) {
+      device_s *current_dev = getDevice(currentImage.dev_addr);
+      if (current_dev != NULL && current_dev->type == CD_TYPE) {
+        currentImage.dev_addr = 0xFF;
+        currentImage.lun = 0x0;
+      }
+    }
+    mediaFallbackPrepared = true;
   }
-  for (int i=0; i<CFG_TUH_DEVICE_MAX; i++) {
+
+  if (mediaRequestedDevice != 0xFF) {
+    if (requestLoad != 0xFF) {
+      gpio_put(CDMDCHG, 1);
+      return;
+    }
+    if (currentImage.dev_addr == mediaRequestedDevice) {
+      mediaSearchActive = false;
+      mediaFallbackPrepared = false;
+      gpio_put(CDMDCHG, 1);
+      return;
+    }
+    mediaRequestedDevice = 0xFF;
+    mediaSearchIndex++;
+  }
+
+  for (int i = mediaSearchIndex; i < CFG_TUH_DEVICE_MAX; i++) {
     LOG_SATA("Look for BootImage on %d\n", i);
     device_s *dev = getDeviceIndex(i);
     if (dev->dev_addr == 0xFF) {
@@ -693,18 +749,17 @@ void handleMediaInterrupt() {
     }
     if (dev->type == MSC_TYPE) {
       LOG_SATA("%d is a MSC\n", i);
-      requestBootImage();
-      waitForLoad();
-      LOG_SATA("Loaded on %d\n", i);
+      if (dev->state != MOUNTED || !dev->isFatFs) continue;
+      requestBootImage(dev->dev_addr);
+      mediaRequestedDevice = dev->dev_addr;
+      mediaSearchIndex = i;
+      gpio_put(CDMDCHG, 1);
+      return;
     }
-    if (dev->type == CD_TYPE) {
-      LOG_SATA("%d is a CD (%d)\n", i, dev->state);
-      wakeUpCDRom(dev->dev_addr, dev->lun);
-      set3doCDReady(dev->dev_addr, dev->state == MOUNTED);
-      set3doDriveMounted(dev->dev_addr, dev->state  == MOUNTED);
-    }
-
   }
+
+  mediaSearchActive = false;
+  mediaFallbackPrepared = false;
   gpio_put(CDMDCHG, 1); //Under reset
   // pio_sm_set_enabled(pio0, sm_read, false);
   // errorCode |= POWER_OR_RESET_OCCURED;

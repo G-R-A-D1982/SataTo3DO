@@ -30,6 +30,9 @@ typedef struct {
   bool canBeLoaded;
   bool isFatFs;
   bool useable;
+  volatile bool cdProbePending;
+  volatile bool cdTrayStatePending;
+  volatile bool cdMediaReady;
   device_type_t type;
   usb_state_t state;
   bool tray_open;
@@ -47,7 +50,7 @@ typedef enum {
 } fileCmd_s;
 
 extern uint8_t usb_state;
-extern volatile int8_t requestLoad;
+extern volatile uint8_t requestLoad;
 
 extern bool usb_cmd_on_going;
 

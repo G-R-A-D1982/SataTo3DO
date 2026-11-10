@@ -169,19 +169,19 @@ static bool check_eject(uint8_t dev_addr) {
 }
 
 
-void requestBootImage() {
-  requestLoad = true;
-}
-
-void waitForLoad() {
-  while(requestLoad);
+void requestBootImage(uint8_t dev_addr) {
+  requestLoad = dev_addr;
 }
 
 static void check_load(uint8_t dev_addr) {
   device_s *dev = getDevice(dev_addr);
-  if (requestLoad && dev->isFatFs) {
-    //Execute right now
-    requestLoad = !handleBootImage(dev_addr);
+  if (requestLoad == dev_addr) {
+    if (dev == NULL || !dev->isFatFs) {
+      requestLoad = 0xFF;
+      return;
+    }
+    handleBootImage(dev_addr);
+    requestLoad = 0xFF;
   }
 }
 
@@ -955,10 +955,13 @@ bool loadBootIso(uint8_t dev_addr) {
 }
 
 static bool handleBootImage(uint8_t dev_addr) {
-  device_s *dev = getDevice(currentImage.dev_addr);
-  if ((currentImage.dev_addr != 0xFF) && (dev->type == MSC_TYPE) && (currentImage.dev_addr != dev_addr)) {
-    LOG_SATA("Boot image is on %d\n", currentImage.dev_addr);
-    return true;
+  if (currentImage.dev_addr != 0xFF) {
+    device_s *dev = getDevice(currentImage.dev_addr);
+    if (dev != NULL && dev->type == CD_TYPE) return true;
+    if (dev != NULL && dev->type == MSC_TYPE && currentImage.dev_addr != dev_addr) {
+      LOG_SATA("Boot image is on %d\n", currentImage.dev_addr);
+      return true;
+    }
   }
   LOG_SATA("Handle Boot image %d (%d)\n", onMountMode, playlist.nb_entries);
   if (playlist.nb_entries != 0) {
@@ -973,11 +976,14 @@ static bool handleBootImage(uint8_t dev_addr) {
 bool MSC_Inquiry(uint8_t dev_addr, uint8_t lun) {
   FRESULT result;
   LOG_SATA("MSC_Inquiry %d\n", dev_addr);
+  device_s *dev = getDevice(dev_addr);
+  if (dev == NULL) return false;
+  dev->isFatFs = false;
   if (tuh_msc_get_block_size(dev_addr, lun) == 0) {
     LOG_SATA("MSC block is 0\n");
+    mediaInterrupt();
     return false;
   }
-  device_s *dev = getDevice(dev_addr);
   char path[7];
   snprintf(path, 7, "%d://", dev_addr-1);
   LOG_SATA("Try to mount on %s\n", path);
@@ -986,12 +992,14 @@ bool MSC_Inquiry(uint8_t dev_addr, uint8_t lun) {
     LOG_SATA("Can not mount\n");
     dev->isFatFs = false;
     dev->useable = false;
+    mediaInterrupt();
     return false;
   }
   dev->isFatFs = true;
   dev->useable = true;
   LOG_SATA("MSC mounted here: %s\n", path);
   mediaInterrupt();
+  return true;
 }
 
 int getTocLevel(void) {

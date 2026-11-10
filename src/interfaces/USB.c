@@ -13,6 +13,8 @@ bool usb_cmd_on_going = false;
 
 static scsi_inquiry_resp_t inquiry_resp;
 static bool inquiry_complete_cb(uint8_t dev_addr, msc_cbw_t const* cbw, msc_csw_t const* csw);
+static scsi_sense_fixed_resp_t cd_sense_response[CFG_TUH_DEVICE_MAX];
+static bool cd_sense_complete_cb(uint8_t dev_addr, msc_cbw_t const* cbw, msc_csw_t const* csw);
 
 static device_s devices[CFG_TUH_DEVICE_MAX] = {0};
 
@@ -40,8 +42,12 @@ void USB_Host_init() {
     for (int i = 0; i<CFG_TUH_DEVICE_MAX; i++) {
       devices[i].dev_addr = 0xFF;
       devices[i].useable = false;
+      devices[i].isFatFs = false;
       devices[i].canBeLoaded = false;
       devices[i].canBeEjected = false;
+      devices[i].cdProbePending = false;
+      devices[i].cdTrayStatePending = false;
+      devices[i].cdMediaReady = false;
       devices[i].state = DETACHED;
       devices[i].type = UNKNOWN_TYPE;
       devices[i].tray_open = false;
@@ -111,7 +117,7 @@ void USB_Host_loop()
 // MACRO TYPEDEF CONSTANT ENUM DECLARATION
 //--------------------------------------------------------------------+
 
-volatile int8_t requestLoad = -1;
+volatile uint8_t requestLoad = 0xFF;
 cd_s currentImage = {0};
 
 static bool startClose = true;
@@ -190,10 +196,49 @@ void tryCheckForMedia(device_s *dev) {
   add_alarm_in_ms(500, alarm_callback, (void*)dev, false);
 }
 
+static bool cd_sense_complete_cb(uint8_t dev_addr, msc_cbw_t const* cbw, msc_csw_t const* csw) {
+  (void)cbw;
+  if (dev_addr == 0 || dev_addr > CFG_TUH_DEVICE_MAX) return false;
+
+  device_s *dev = getDevice(dev_addr);
+  if (dev == NULL || dev->type != CD_TYPE) return false;
+
+  scsi_sense_fixed_resp_t const* sense = &cd_sense_response[dev_addr - 1];
+  dev->tray_open = csw->status == MSC_CSW_STATUS_GOOD &&
+      ((sense->response_code & 0x7F) == 0x70 || (sense->response_code & 0x7F) == 0x71) &&
+      sense->sense_key == SCSI_SENSE_NOT_READY &&
+      sense->add_sense_code == 0x3A && sense->add_sense_qualifier == 0x02;
+  dev->cdTrayStatePending = false;
+  mediaInterrupt();
+  return true;
+}
+
 void tuh_msc_ready_cb(uint8_t dev_addr, bool ready) {
+  if (dev_addr == 0 || dev_addr > CFG_TUH_DEVICE_MAX) return;
   device_s *dev=getDevice(dev_addr);
-  if (dev->type == CD_TYPE)
+  if (dev->type == CD_TYPE) {
     CDROM_ready(dev_addr, ready);
+    if (!ready) {
+      dev->cdProbePending = false;
+      dev->cdMediaReady = false;
+      if (!dev->cdTrayStatePending) {
+        dev->cdTrayStatePending = true;
+        memset(&cd_sense_response[dev_addr - 1], 0, sizeof(cd_sense_response[dev_addr - 1]));
+        if (!tuh_msc_request_sense(dev_addr, dev->lun, &cd_sense_response[dev_addr - 1],
+                                   cd_sense_complete_cb)) {
+          dev->cdTrayStatePending = false;
+          dev->tray_open = false;
+        }
+      }
+      mediaInterrupt();
+    } else {
+      dev->cdTrayStatePending = false;
+      dev->tray_open = false;
+      if (!dev->cdProbePending && !dev->cdMediaReady) {
+        CDROM_Inquiry(dev_addr, dev->lun);
+      }
+    }
+  }
   if (!ready) {
     tryCheckForMedia(dev);
     //Voir pour executer le check for media tous les 300 ms au plus rapide
@@ -307,6 +352,7 @@ void tuh_msc_umount_cb(uint8_t dev_addr)
   device_s *dev = getDevice(dev_addr);
 
   LOG_SATA("A USB MassStorage device is unmounted\r\n");
+  if (requestLoad == dev_addr) requestLoad = 0xFF;
 
   //A voir si la currentImage utilise le dev_addr en question...
   //Pour le moment on va dire oui
@@ -326,8 +372,12 @@ void tuh_msc_umount_cb(uint8_t dev_addr)
   }
   dev->dev_addr = 0xFF;
   dev->useable = false;
+  dev->isFatFs = false;
   dev->canBeLoaded = false;
   dev->canBeEjected = false;
+  dev->cdProbePending = false;
+  dev->cdTrayStatePending = false;
+  dev->cdMediaReady = false;
   dev->state = DETACHED;
   dev->type = UNKNOWN_TYPE;
   deviceCnt--;
