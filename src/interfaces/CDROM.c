@@ -1,6 +1,7 @@
 #include "USB.h"
 #include "3DO.h"
 #include "CDFormat.h"
+#include "CDROM.h"
 #include "pico/stdio.h"
 
 #if CFG_TUH_MSC
@@ -215,7 +216,7 @@ static bool read_toc_complete_cb(uint8_t dev_addr, msc_cbw_t const* cbw, msc_csw
     //OxAA as id mean lead out
     dev->rawImage.tracks[i].id = readBuffer[index + 2];
     dev->rawImage.tracks[i].CTRL_ADR = readBuffer[index + 1];
-    // The TOC control bits occupy the high nibble; bit 2 marks a data track.
+    // The TOC byte stores CONTROL in the high nibble; its bit 2 marks data tracks.
     dev->rawImage.tracks[i].mode =
         (dev->rawImage.tracks[i].CTRL_ADR & 0x40) != 0 ? MODE_1 : CDDA;
     dev->rawImage.tracks[i].msf[0] = readBuffer[index + 5]; //MSF
@@ -275,34 +276,44 @@ static uint8_t capabilties_buffer[256];
 static bool mode_sense_complete_cb(uint8_t dev_addr, msc_cbw_t const* cbw, msc_csw_t const* csw)
 {
   device_s *dev = getDevice(dev_addr);
+  if (dev == NULL) return false;
+  dev->cdCapabilitiesPending = false;
+  dev->cdCapabilitiesChecked = true;
 
   dev->canBeLoaded = true;
   dev->canBeEjected = true;
 
   uint16_t length = (capabilties_buffer[0]<<8)+capabilties_buffer[1];
   uint16_t block_descriptor_length = (capabilties_buffer[6]<<8)+capabilties_buffer[7]+8;
-  if ((length < 128) && (block_descriptor_length<length)) {
+  if (csw->status == MSC_CSW_STATUS_GOOD && (length < 128) && (block_descriptor_length<length)) {
     if ((capabilties_buffer[block_descriptor_length + 6] >> 5) == 0) dev->canBeLoaded = false;
     if ((capabilties_buffer[block_descriptor_length + 6] & 0x8) == 0) dev->canBeEjected = false;
     LOG_SATA("Can Load %d, Can Eject %d %d\n", dev->canBeLoaded, dev->canBeEjected);
-    dev->state = CONFIGURED;
-    return true;
   }
+  dev->state = CONFIGURED;
+  if (dev->cdReadyKnown && dev->cdLastReady && !dev->cdProbePending && !dev->cdMediaReady) {
+    CDROM_Inquiry(dev_addr, dev->lun);
+  }
+  return true;
 }
 
 static bool CheckCDCapabilities(uint8_t dev_addr) {
   device_s *dev = getDevice(dev_addr);
-
-  return tuh_msc_mode_sense(dev_addr, dev->lun, 0x2A, 0x0, 0x0, 128, &capabilties_buffer[0], mode_sense_complete_cb);
+  if (dev == NULL) return false;
+  if (dev->cdCapabilitiesPending) return true;
+  dev->cdCapabilitiesPending = true;
+  if (!tuh_msc_mode_sense(dev_addr, dev->lun, 0x2A, 0x0, 0x0, 128, &capabilties_buffer[0], mode_sense_complete_cb)) {
+    dev->cdCapabilitiesPending = false;
+    dev->cdCapabilitiesChecked = true;
+    return false;
+  }
+  return true;
 }
 
-void CDROM_ready(uint8_t dev_addr, bool ready) {
-  //Get capabilities in sync
+bool CDROM_ready(uint8_t dev_addr, bool ready) {
   device_s *dev = getDevice(dev_addr);
-  if (dev->state == ENUMERATED) {
-    CheckCDCapabilities(dev_addr);
-  }
-  if (!ready) return;
+  if (dev == NULL || !ready || dev->cdCapabilitiesChecked) return false;
+  return CheckCDCapabilities(dev_addr);
 }
 
 bool CDROM_Inquiry(uint8_t dev_addr, uint8_t lun) {

@@ -48,6 +48,10 @@ void USB_Host_init() {
       devices[i].cdProbePending = false;
       devices[i].cdTrayStatePending = false;
       devices[i].cdMediaReady = false;
+      devices[i].cdCapabilitiesPending = false;
+      devices[i].cdCapabilitiesChecked = false;
+      devices[i].cdReadyKnown = false;
+      devices[i].cdLastReady = false;
       devices[i].state = DETACHED;
       devices[i].type = UNKNOWN_TYPE;
       devices[i].tray_open = false;
@@ -204,12 +208,18 @@ static bool cd_sense_complete_cb(uint8_t dev_addr, msc_cbw_t const* cbw, msc_csw
   if (dev == NULL || dev->type != CD_TYPE) return false;
 
   scsi_sense_fixed_resp_t const* sense = &cd_sense_response[dev_addr - 1];
-  dev->tray_open = csw->status == MSC_CSW_STATUS_GOOD &&
+  bool const no_medium = csw->status == MSC_CSW_STATUS_GOOD &&
       ((sense->response_code & 0x7F) == 0x70 || (sense->response_code & 0x7F) == 0x71) &&
-      sense->sense_key == SCSI_SENSE_NOT_READY &&
-      sense->add_sense_code == 0x3A && sense->add_sense_qualifier == 0x02;
+      sense->sense_key == SCSI_SENSE_NOT_READY && sense->add_sense_code == 0x3A;
+  if (no_medium) {
+    dev->cdProbePending = false;
+    dev->cdMediaReady = false;
+  }
+  bool const tray_open = no_medium && sense->add_sense_qualifier == 0x02;
+  bool const tray_state_changed = dev->tray_open != tray_open;
+  dev->tray_open = tray_open;
   dev->cdTrayStatePending = false;
-  mediaInterrupt();
+  if (tray_state_changed) mediaInterrupt();
   return true;
 }
 
@@ -217,7 +227,9 @@ void tuh_msc_ready_cb(uint8_t dev_addr, bool ready) {
   if (dev_addr == 0 || dev_addr > CFG_TUH_DEVICE_MAX) return;
   device_s *dev=getDevice(dev_addr);
   if (dev->type == CD_TYPE) {
-    CDROM_ready(dev_addr, ready);
+    bool const readiness_changed = !dev->cdReadyKnown || dev->cdLastReady != ready;
+    dev->cdReadyKnown = true;
+    dev->cdLastReady = ready;
     if (!ready) {
       dev->cdProbePending = false;
       dev->cdMediaReady = false;
@@ -230,10 +242,13 @@ void tuh_msc_ready_cb(uint8_t dev_addr, bool ready) {
           dev->tray_open = false;
         }
       }
-      mediaInterrupt();
+      if (readiness_changed) mediaInterrupt();
     } else {
       dev->cdTrayStatePending = false;
       dev->tray_open = false;
+      if (!dev->cdCapabilitiesChecked && CDROM_ready(dev_addr, true)) {
+        return;
+      }
       if (!dev->cdProbePending && !dev->cdMediaReady) {
         CDROM_Inquiry(dev_addr, dev->lun);
       }
@@ -378,6 +393,10 @@ void tuh_msc_umount_cb(uint8_t dev_addr)
   dev->cdProbePending = false;
   dev->cdTrayStatePending = false;
   dev->cdMediaReady = false;
+  dev->cdCapabilitiesPending = false;
+  dev->cdCapabilitiesChecked = false;
+  dev->cdReadyKnown = false;
+  dev->cdLastReady = false;
   dev->state = DETACHED;
   dev->type = UNKNOWN_TYPE;
   deviceCnt--;

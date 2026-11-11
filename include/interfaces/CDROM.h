@@ -11,7 +11,7 @@ extern bool CDROM_Inquiry(uint8_t dev_addr, uint8_t lun);
 
 extern bool CDROM_ExecuteEject(uint8_t dev_addr);
 
-extern void CDROM_ready(uint8_t dev_addr, bool ready);
+extern bool CDROM_ready(uint8_t dev_addr, bool ready);
 
 extern void wakeUpCDRom(uint8_t dev_addr, uint8_t lun);
 

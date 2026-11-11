@@ -664,7 +664,7 @@ void handleMediaInterrupt() {
     mediaSearchIndex = 0;
     mediaRequestedDevice = 0xFF;
     gpio_put(CDMDCHG, 0); //Under reset
-    status &= ~DISC_PRESENT & ~SPINNING;
+    status &= ~(DISC_PRESENT | SPINNING | DISC_RDY);
     status |= CHECK_ERROR;
     errorCode = DISC_REMOVED;
     sleep_ms(10);
