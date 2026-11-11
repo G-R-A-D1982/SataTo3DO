@@ -642,8 +642,13 @@ void sendRawData(int command, uint8_t *buffer, int length) {
 static volatile bool hasMediaInterrupt = false;
 static bool mediaSearchActive = false;
 static bool mediaFallbackPrepared = false;
+static bool cdSpinupWaitActive = false;
+static bool cdSpinupWaitExpired = false;
+static absolute_time_t cdSpinupDeadline;
 static int mediaSearchIndex = 0;
 static uint8_t mediaRequestedDevice = 0xFF;
+
+#define CD_SPINUP_WAIT_MS 15000
 
 void mediaInterrupt(void) {
   hasMediaInterrupt = true;
@@ -652,6 +657,14 @@ void mediaInterrupt(void) {
 }
 void handleMediaInterrupt() {
   if (!hasMediaInterrupt && !mediaSearchActive) return;
+  if (!mediaSearchActive && currentImage.dev_addr != 0xFF &&
+      getPlaylistEntries() == 0) {
+    device_s *active_dev = getDevice(currentImage.dev_addr);
+    if (active_dev != NULL && active_dev->type == MSC_TYPE) {
+      hasMediaInterrupt = false;
+      return;
+    }
+  }
   if (!mediaSearchActive) {
     if ((status & DISC_PRESENT) && !canHandleReset) {
       gpio_put(LED, ledState);
@@ -661,6 +674,8 @@ void handleMediaInterrupt() {
 
     mediaSearchActive = true;
     mediaFallbackPrepared = false;
+    cdSpinupWaitActive = false;
+    cdSpinupWaitExpired = false;
     mediaSearchIndex = 0;
     mediaRequestedDevice = 0xFF;
     gpio_put(CDMDCHG, 0); //Under reset
@@ -705,6 +720,25 @@ void handleMediaInterrupt() {
     gpio_put(CDMDCHG, 1);
     return;
   }
+
+  bool cdWaitingForSpinup = false;
+  for (int i = 0; i < CFG_TUH_DEVICE_MAX; i++) {
+    device_s *dev = getDeviceIndex(i);
+    if (dev->dev_addr != 0xFF && dev->type == CD_TYPE && !dev->tray_open &&
+        (!dev->cdReadyKnown || !dev->cdLastReady)) {
+      cdWaitingForSpinup = true;
+      break;
+    }
+  }
+  if (cdWaitingForSpinup && !cdSpinupWaitExpired) {
+    if (!cdSpinupWaitActive) {
+      cdSpinupDeadline = make_timeout_time_ms(CD_SPINUP_WAIT_MS);
+      cdSpinupWaitActive = true;
+    }
+    if (absolute_time_diff_us(get_absolute_time(), cdSpinupDeadline) > 0) return;
+    cdSpinupWaitExpired = true;
+  }
+  cdSpinupWaitActive = false;
 
   if (!mediaFallbackPrepared) {
     if (getPlaylistEntries() == 0) {
