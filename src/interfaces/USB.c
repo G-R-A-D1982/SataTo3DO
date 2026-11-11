@@ -303,7 +303,7 @@ bool isAudioBlock(uint32_t start) {
   bool res = false;
   for (int i = 0; i < currentImage.nb_track-1; i++) {
     if (currentImage.tracks[i].lba <= start) {
-      res = ((currentImage.tracks[i].CTRL_ADR & 0x4) == 0x0);
+      res = currentImage.tracks[i].mode == CDDA;
     }
   }
   return res;
@@ -318,7 +318,7 @@ bool readBlock(uint32_t start, uint16_t nb_block, uint16_t block_size, uint8_t *
   buffer_Block = buffer;
   for (int i = 0; i < currentImage.nb_track-1; i++) {
     if (currentImage.tracks[i].lba <= start) {
-      is_audio = ((currentImage.tracks[i].CTRL_ADR & 0x4) == 0x0);
+      is_audio = currentImage.tracks[i].mode == CDDA;
       has_subQ = (block_size >= 2448);
     }
   }

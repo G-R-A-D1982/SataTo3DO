@@ -511,7 +511,7 @@ static bool LoadfromCue(char *filePath) {
     currentImage.format = 0x0;
     for (int i = 0; i<currentImage.last_track; i++)
     {
-      if (currentImage.tracks[i].CTRL_ADR & 0x4) {
+      if (currentImage.tracks[i].mode != CDDA) {
         currentImage.hasOnlyAudio = false;
       }
       if (currentImage.tracks[i].mode == MODE_2){

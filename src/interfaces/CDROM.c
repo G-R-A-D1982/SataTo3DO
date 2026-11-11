@@ -215,16 +215,19 @@ static bool read_toc_complete_cb(uint8_t dev_addr, msc_cbw_t const* cbw, msc_csw
     //OxAA as id mean lead out
     dev->rawImage.tracks[i].id = readBuffer[index + 2];
     dev->rawImage.tracks[i].CTRL_ADR = readBuffer[index + 1];
+    // The TOC control bits occupy the high nibble; bit 2 marks a data track.
+    dev->rawImage.tracks[i].mode =
+        (dev->rawImage.tracks[i].CTRL_ADR & 0x40) != 0 ? MODE_1 : CDDA;
     dev->rawImage.tracks[i].msf[0] = readBuffer[index + 5]; //MSF
     dev->rawImage.tracks[i].msf[1] = readBuffer[index + 6];
     dev->rawImage.tracks[i].msf[2] = readBuffer[index + 7];
-    if ((dev->rawImage.tracks[i].CTRL_ADR & 0x4) != 0) dev->rawImage.hasOnlyAudio = false;
+    if (dev->rawImage.tracks[i].mode != CDDA) dev->rawImage.hasOnlyAudio = false;
     dev->rawImage.tracks[i].lba = dev->rawImage.tracks[i].msf[0]*60*75+dev->rawImage.tracks[i].msf[1]*75+dev->rawImage.tracks[i].msf[2] - 150;
     LOG_SATA("Track[%d] 0x%x (0x%x)=> %d:%d:%d\n", i, dev->rawImage.tracks[i].id, dev->rawImage.tracks[i].CTRL_ADR, dev->rawImage.tracks[i].msf[0], dev->rawImage.tracks[i].msf[1], dev->rawImage.tracks[i].msf[2]);
   }
 
   uint32_t first_track = dev->rawImage.tracks[0].msf[0]*60*75+dev->rawImage.tracks[0].msf[1]*75+dev->rawImage.tracks[0].msf[2] - 150;
-  if (dev->rawImage.tracks[0].CTRL_ADR & 0x4) {
+  if (dev->rawImage.tracks[0].mode != CDDA) {
     if (!tuh_msc_read_header(dev_addr, cbw->lun, readBuffer, first_track, read_header_complete_cb)) {
       LOG_SATA("Got error with header read\n");
       cd_probe_failed(dev_addr);
