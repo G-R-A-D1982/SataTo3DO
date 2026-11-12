@@ -74,18 +74,8 @@ int getPlaylistEntries() {
   return playlist.nb_entries;
 }
 
-void updatePlayListEntries() {
-  if (getPlaylistEntries() != 0) {
-    if (playlist.current_entry == playlist.nb_entries) {
-      LOG_SATA("Playlist done - clearing\n");
-      clearPlaylist();
-      current_toc_level = 0;
-      current_toc = 0x00000000;
-      f_closedir(&currentImage.curDir->dir);
-      if (currentImage.curPath != NULL) free(currentImage.curPath);
-      currentImage.curPath = NULL;
-    }
-  }
+bool playlistIsFinished(void) {
+  return playlist.nb_entries != 0 && playlist.current_entry >= playlist.nb_entries;
 }
 
 bool MSC_Host_loop(device_s *dev)
@@ -238,6 +228,9 @@ void clearPlaylist(void) {
   }
   playlist.nb_entries = 0;
   playlist.current_entry = 0;
+  current_toc_level = 0;
+  current_toc = 0;
+  current_toc_offset = 0;
 }
 
 
@@ -894,7 +887,6 @@ bool loadPlaylistEntry(uint8_t dev_addr) {
   }
   if (loaded) {
     playlist.current_entry++;
-    updatePlayListEntries();
   }
 
   return ret;

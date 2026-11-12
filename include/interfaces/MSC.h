@@ -38,7 +38,7 @@ extern void requestCloseFile();
 extern void requestBootImage(uint8_t dev_addr);
 
 extern int getPlaylistEntries();
-extern void updatePlayListEntries();
+extern bool playlistIsFinished(void);
 
 
 #endif

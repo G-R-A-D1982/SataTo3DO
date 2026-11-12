@@ -63,6 +63,7 @@ static bool command_complete_cb(uint8_t dev_addr, msc_cbw_t const* cbw, msc_csw_
   device_s *dev = getDevice(dev_addr);
   if (csw->status != MSC_CSW_STATUS_GOOD) {
     set3doDriveError();
+    dev->cdEjectPending = false;
   }
   dev->tray_open = !dev->tray_open;
   usb_cmd_on_going = false;
@@ -78,8 +79,12 @@ bool CDROM_ExecuteEject(uint8_t dev_addr) {
   LOG_SATA("Eject CDROM %d\n", dev->tray_open);
   if (!dev->canBeLoaded && !dev->canBeEjected) {
     LOG_SATA("Can not load or eject\n");
+    dev->cdEjectPending = false;
+    dev->cdReadyKnown = false;
+    dev->cdLastReady = false;
     set3doCDReady(dev_addr, false);
     set3doDriveMounted(dev_addr, false);
+    mediaInterrupt();
     return true;
   }
 
@@ -92,8 +97,10 @@ bool CDROM_ExecuteEject(uint8_t dev_addr) {
     dev->tray_open = true;
   }
 
+  dev->cdEjectPending = !dev->tray_open;
   if ( !tuh_msc_start_stop(dev->dev_addr, dev->lun, dev->tray_open, true, command_complete_cb)) {
     LOG_SATA("Got error while eject command\n");
+    dev->cdEjectPending = false;
   }
   else {
     set3doCDReady(dev_addr, false);
@@ -216,9 +223,10 @@ static bool read_toc_complete_cb(uint8_t dev_addr, msc_cbw_t const* cbw, msc_csw
     //OxAA as id mean lead out
     dev->rawImage.tracks[i].id = readBuffer[index + 2];
     dev->rawImage.tracks[i].CTRL_ADR = readBuffer[index + 1];
-    // The TOC byte stores CONTROL in the high nibble; its bit 2 marks data tracks.
+    // Drives report the data-track bit in either nibble layout.
+    bool const is_data_track = (dev->rawImage.tracks[i].CTRL_ADR & 0x44) != 0;
     dev->rawImage.tracks[i].mode =
-        (dev->rawImage.tracks[i].CTRL_ADR & 0x40) != 0 ? MODE_1 : CDDA;
+        is_data_track ? MODE_1 : CDDA;
     dev->rawImage.tracks[i].msf[0] = readBuffer[index + 5]; //MSF
     dev->rawImage.tracks[i].msf[1] = readBuffer[index + 6];
     dev->rawImage.tracks[i].msf[2] = readBuffer[index + 7];

@@ -52,6 +52,7 @@ void USB_Host_init() {
       devices[i].cdCapabilitiesChecked = false;
       devices[i].cdReadyKnown = false;
       devices[i].cdLastReady = false;
+      devices[i].cdEjectPending = false;
       devices[i].state = DETACHED;
       devices[i].type = UNKNOWN_TYPE;
       devices[i].tray_open = false;
@@ -216,10 +217,15 @@ static bool cd_sense_complete_cb(uint8_t dev_addr, msc_cbw_t const* cbw, msc_csw
     dev->cdMediaReady = false;
   }
   bool const tray_open = no_medium && sense->add_sense_qualifier == 0x02;
+  bool const eject_pending = dev->cdEjectPending;
   bool const tray_state_changed = dev->tray_open != tray_open;
   dev->tray_open = tray_open;
+  dev->cdEjectPending = false;
   dev->cdTrayStatePending = false;
-  if (tray_state_changed) mediaInterrupt();
+  if ((tray_state_changed && !(eject_pending && tray_open)) ||
+      (eject_pending && !tray_open)) {
+    mediaInterrupt();
+  }
   return true;
 }
 
@@ -242,8 +248,9 @@ void tuh_msc_ready_cb(uint8_t dev_addr, bool ready) {
           dev->tray_open = false;
         }
       }
-      if (readiness_changed) mediaInterrupt();
+      if (readiness_changed && !dev->cdEjectPending) mediaInterrupt();
     } else {
+      dev->cdEjectPending = false;
       dev->cdTrayStatePending = false;
       dev->tray_open = false;
       if (!dev->cdCapabilitiesChecked && CDROM_ready(dev_addr, true)) {
@@ -293,6 +300,13 @@ bool write_is_ready(bool *success) {
 bool USBDriveEject(uint8_t dev_addr, bool eject) {
   device_s *dev = getDevice(dev_addr);
   if (dev->type == CD_TYPE) {
+    if (eject) {
+      dev->cdEjectPending = true;
+      dev->cdMediaReady = false;
+      dev->cdReadyKnown = false;
+      dev->cdLastReady = false;
+      set3doCDReady(dev_addr, false);
+    }
     dev->state = EJECTING;
     return true;
   }
@@ -397,6 +411,7 @@ void tuh_msc_umount_cb(uint8_t dev_addr)
   dev->cdCapabilitiesChecked = false;
   dev->cdReadyKnown = false;
   dev->cdLastReady = false;
+  dev->cdEjectPending = false;
   dev->state = DETACHED;
   dev->type = UNKNOWN_TYPE;
   deviceCnt--;

@@ -175,6 +175,8 @@ static bool use_cdrom = false;
 static bool ledState = false;
 
 static bool canHandleReset = false;
+static volatile bool mediaPlaylistAdvanceRequested = false;
+static volatile bool mediaRestartBootRequested = false;
 
 static int pitch = 0;
 
@@ -183,38 +185,18 @@ static uint8_t status = TRAY_IN | CHECK_ERROR | DISC_RDY;
 
 void close_tray(bool close) {
   device_s *dev = NULL;
-  bool has_usb = false;
   bool has_cd = false;
   for (int i = 0; i<CFG_TUH_DEVICE_MAX; i++) {
     device_s *curdev = getDeviceIndex(i);
-    if (curdev->type == MSC_TYPE) {
-      has_usb = true;
-    }
     if (curdev->type == CD_TYPE) {
       has_cd = true;
     }
   }
-  LOG_SATA("Ask to eject %d has_sub %d has_cd %d\n", close, has_usb, has_cd);
+  LOG_SATA("Ask to eject %d has_cd %d\n", close, has_cd);
   //By default eject currentImage device
   if (currentImage.dev_addr != 0xFF) dev = getDevice(currentImage.dev_addr);
   //In case there is no currentImage, we might have an invalid CD
   if ((currentImage.dev_addr == 0xFF) && (has_cd)) {
-    for (int i = 0; i<CFG_TUH_DEVICE_MAX; i++) {
-      device_s *curdev = getDeviceIndex(i);
-      if (curdev->type == CD_TYPE) {
-        dev = curdev;
-        break;
-      }
-    }
-  }
-  if (dev != NULL) {
-    //If the currentImage device is a cd but we have usb key, do not eject it
-    if ((dev->type == CD_TYPE) && (has_usb))
-      dev = NULL;
-  }
-  //But In case we are on Boot menu and there is a CD, eject the CD
-  if (onBootIso & has_cd) {
-    //on Boot menu, if there is a CDROM, try to eject it.
     for (int i = 0; i<CFG_TUH_DEVICE_MAX; i++) {
       device_s *curdev = getDeviceIndex(i);
       if (curdev->type == CD_TYPE) {
@@ -229,10 +211,16 @@ void close_tray(bool close) {
       LOG_SATA("Can not eject/inject\n");
       return;
     }
+    mediaPlaylistAdvanceRequested =
+        dev->type == MSC_TYPE && getPlaylistEntries() > 0 &&
+        !playlistIsFinished();
+    mediaRestartBootRequested =
+        dev->type == MSC_TYPE && playlistIsFinished();
+  } else {
+    mediaPlaylistAdvanceRequested = false;
+    mediaRestartBootRequested = false;
   }
-  // status &= ~TRAY_IN;
-  if (!onBootIso)
-    mediaInterrupt();
+  mediaInterrupt();
 }
 
 void wait_out_of_reset() {
@@ -267,7 +255,15 @@ void set3doCDReady(uint8_t dev_addr, bool on) {
     errorCode = 0;
     status &= ~CHECK_ERROR;
   } else {
-    if (on) LOG_SATA("Current Image is on dev addr %x but CD is %x\n", currentImage.dev_addr, dev_addr);
+    if (on) {
+      LOG_SATA("Current Image is on dev addr %x but CD is %x\n", currentImage.dev_addr, dev_addr);
+    } else if (currentImage.dev_addr == dev_addr) {
+      status &= ~(DISC_PRESENT | SPINNING | DISC_RDY);
+      status |= CHECK_ERROR;
+      errorCode = DISC_REMOVED;
+      device_s *dev = getDevice(dev_addr);
+      if (dev != NULL && dev->cdEjectPending) status &= ~TRAY_IN;
+    }
   }
 
 }
@@ -601,7 +597,9 @@ void sendData(int startlba, int nb_block, bool trace) {
       return;
     }
 
-    readBlock(startlba, 1, currentImage.block_size_read, &buffer[0]);
+    uint16_t block_size = isAudioBlock(startlba)
+        ? currentImage.block_size_read : 2048;
+    readBlock(startlba, 1, block_size, &buffer[0]);
     if (trace) b= get_absolute_time();
     while(!block_is_ready() && !errorOnDisk && gpio_get(CDRST));
 
@@ -625,7 +623,7 @@ void sendData(int startlba, int nb_block, bool trace) {
     startlba++;
     id = (id++)%2;
     if (trace) d= get_absolute_time();
-    if (!sendAnswerStatusMixed(&buffer[0], currentImage.block_size_read, status_buffer, 2, nb_block == 0, trace)) return;
+    if (!sendAnswerStatusMixed(&buffer[0], block_size, status_buffer, 2, nb_block == 0, trace)) return;
     if (trace) e = get_absolute_time();
     if (trace)
       LOG_SATA("send data a %lld, b %lld, c %lld, d %lld, e %lld\n", absolute_time_diff_us(s,a), absolute_time_diff_us(a,b), absolute_time_diff_us(b,c), absolute_time_diff_us(c,d), absolute_time_diff_us(d,e));
@@ -650,6 +648,16 @@ static uint8_t mediaRequestedDevice = 0xFF;
 
 #define CD_SPINUP_WAIT_MS 15000
 
+static bool hasClosedCD(void) {
+  for (int i = 0; i < CFG_TUH_DEVICE_MAX; i++) {
+    device_s *dev = getDeviceIndex(i);
+    if (dev->dev_addr != 0xFF && dev->type == CD_TYPE && !dev->tray_open) {
+      return true;
+    }
+  }
+  return false;
+}
+
 void mediaInterrupt(void) {
   hasMediaInterrupt = true;
   // canHandleReset = false;
@@ -657,11 +665,12 @@ void mediaInterrupt(void) {
 }
 void handleMediaInterrupt() {
   if (!hasMediaInterrupt && !mediaSearchActive) return;
-  if (!mediaSearchActive && currentImage.dev_addr != 0xFF &&
-      getPlaylistEntries() == 0) {
+  if (!mediaSearchActive && !mediaPlaylistAdvanceRequested && !mediaRestartBootRequested &&
+      currentImage.dev_addr != 0xFF) {
     device_s *active_dev = getDevice(currentImage.dev_addr);
     if (active_dev != NULL && active_dev->type == MSC_TYPE) {
       hasMediaInterrupt = false;
+      mediaPlaylistAdvanceRequested = false;
       return;
     }
   }
@@ -676,6 +685,11 @@ void handleMediaInterrupt() {
     mediaFallbackPrepared = false;
     cdSpinupWaitActive = false;
     cdSpinupWaitExpired = false;
+    if (!mediaPlaylistAdvanceRequested && !mediaRestartBootRequested &&
+        hasClosedCD()) {
+      cdSpinupDeadline = make_timeout_time_ms(CD_SPINUP_WAIT_MS);
+      cdSpinupWaitActive = true;
+    }
     mediaSearchIndex = 0;
     mediaRequestedDevice = 0xFF;
     gpio_put(CDMDCHG, 0); //Under reset
@@ -695,52 +709,57 @@ void handleMediaInterrupt() {
   for (int i = 0; i < CFG_TUH_DEVICE_MAX; i++) {
     device_s *dev = getDeviceIndex(i);
     if (dev->dev_addr != 0xFF && dev->type == CD_TYPE) {
-      cdProbePending |= dev->cdProbePending || dev->cdTrayStatePending || dev->tray_open;
+      cdProbePending |= dev->cdProbePending || dev->cdTrayStatePending ||
+          dev->cdEjectPending || dev->tray_open;
     }
   }
-  if (cdProbePending) {
+  if (cdProbePending && !mediaPlaylistAdvanceRequested && !mediaRestartBootRequested) {
     gpio_put(CDMDCHG, 1);
     return;
   }
 
-  for (int i = 0; i < CFG_TUH_DEVICE_MAX; i++) {
-    device_s *dev = getDeviceIndex(i);
-    if (dev->dev_addr == 0xFF || dev->type != CD_TYPE || !dev->cdMediaReady) continue;
-
-    if (currentImage.curDir != NULL) free(currentImage.curDir);
-    if (currentImage.curPath != NULL) free(currentImage.curPath);
-    memcpy(&currentImage, &dev->rawImage, sizeof(cd_s));
-    currentImage.dev_addr = dev->dev_addr;
-    currentImage.lun = dev->lun;
-    dev->state = MOUNTED;
-    set3doCDReady(dev->dev_addr, true);
-    set3doDriveMounted(dev->dev_addr, true);
-    mediaSearchActive = false;
-    mediaFallbackPrepared = false;
-    gpio_put(CDMDCHG, 1);
-    return;
-  }
-
-  bool cdWaitingForSpinup = false;
-  for (int i = 0; i < CFG_TUH_DEVICE_MAX; i++) {
-    device_s *dev = getDeviceIndex(i);
-    if (dev->dev_addr != 0xFF && dev->type == CD_TYPE && !dev->tray_open &&
-        (!dev->cdReadyKnown || !dev->cdLastReady)) {
-      cdWaitingForSpinup = true;
-      break;
-    }
-  }
-  if (cdWaitingForSpinup && !cdSpinupWaitExpired) {
+  bool const cdClosed = hasClosedCD();
+  if (cdClosed && !mediaPlaylistAdvanceRequested &&
+      !mediaRestartBootRequested && !cdSpinupWaitExpired) {
     if (!cdSpinupWaitActive) {
       cdSpinupDeadline = make_timeout_time_ms(CD_SPINUP_WAIT_MS);
       cdSpinupWaitActive = true;
     }
-    if (absolute_time_diff_us(get_absolute_time(), cdSpinupDeadline) > 0) return;
+    if (absolute_time_diff_us(get_absolute_time(), cdSpinupDeadline) > 0) {
+      gpio_put(CDMDCHG, 1);
+      return;
+    }
     cdSpinupWaitExpired = true;
+  } else if (!cdClosed || mediaPlaylistAdvanceRequested ||
+             mediaRestartBootRequested) {
+    cdSpinupWaitActive = false;
   }
   cdSpinupWaitActive = false;
 
+  if (!mediaPlaylistAdvanceRequested && !mediaRestartBootRequested) {
+    for (int i = 0; i < CFG_TUH_DEVICE_MAX; i++) {
+      device_s *dev = getDeviceIndex(i);
+      if (dev->dev_addr == 0xFF || dev->type != CD_TYPE || !dev->cdMediaReady) continue;
+
+      if (currentImage.curDir != NULL) free(currentImage.curDir);
+      if (currentImage.curPath != NULL) free(currentImage.curPath);
+      memcpy(&currentImage, &dev->rawImage, sizeof(cd_s));
+      currentImage.dev_addr = dev->dev_addr;
+      currentImage.lun = dev->lun;
+      dev->state = MOUNTED;
+      set3doCDReady(dev->dev_addr, true);
+      set3doDriveMounted(dev->dev_addr, true);
+      mediaSearchActive = false;
+      mediaFallbackPrepared = false;
+      gpio_put(CDMDCHG, 1);
+      return;
+    }
+  }
+
   if (!mediaFallbackPrepared) {
+    if (mediaRestartBootRequested) {
+      clearPlaylist();
+    }
     if (getPlaylistEntries() == 0) {
       if (currentImage.curDir != NULL) free(currentImage.curDir);
       if (currentImage.curPath != NULL) free(currentImage.curPath);
@@ -767,6 +786,8 @@ void handleMediaInterrupt() {
     if (currentImage.dev_addr == mediaRequestedDevice) {
       mediaSearchActive = false;
       mediaFallbackPrepared = false;
+      mediaPlaylistAdvanceRequested = false;
+      mediaRestartBootRequested = false;
       gpio_put(CDMDCHG, 1);
       return;
     }
@@ -794,6 +815,8 @@ void handleMediaInterrupt() {
 
   mediaSearchActive = false;
   mediaFallbackPrepared = false;
+  mediaPlaylistAdvanceRequested = false;
+  mediaRestartBootRequested = false;
   gpio_put(CDMDCHG, 1); //Under reset
   // pio_sm_set_enabled(pio0, sm_read, false);
   // errorCode |= POWER_OR_RESET_OCCURED;
@@ -1238,6 +1261,9 @@ what's your reply to 0x83?
         data_in[i] = GET_BUS(get3doData());
       }
       LOG_SATA("LAUNCH_PLAYLIST\n");
+      mediaPlaylistAdvanceRequested =
+          getPlaylistEntries() > 0 && !playlistIsFinished();
+      mediaRestartBootRequested = playlistIsFinished();
       //Initiate an media change error
       status |= CHECK_ERROR;
       buffer[index++] = LAUNCH_PLAYLIST;
@@ -1463,7 +1489,11 @@ void core1_entry() {
           ejectState = ejectCurrent;
           //Eject button pressed, toggle tray position
           if (!ejectCurrent) {
-            close_tray((status & TRAY_IN) == 0);
+            device_s *active_dev = currentImage.dev_addr == 0xFF
+                ? NULL : getDevice(currentImage.dev_addr);
+            bool close = active_dev != NULL && active_dev->type == CD_TYPE
+                ? active_dev->tray_open : (status & TRAY_IN) == 0;
+            close_tray(close);
           }
           debounceEject = false;
         }

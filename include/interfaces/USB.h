@@ -37,6 +37,7 @@ typedef struct {
   bool cdCapabilitiesChecked;
   bool cdReadyKnown;
   bool cdLastReady;
+  volatile bool cdEjectPending;
   device_type_t type;
   usb_state_t state;
   bool tray_open;
